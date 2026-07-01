@@ -1,3 +1,10 @@
+#'#################################################################
+#' Script para análise da abundância de Ipomoea 
+#' em diferentes geofácies e a influência da matriz circundante. 
+#' 
+#'  Por [Seu Nome AQUI!] 
+#'#################################################################
+
 library(bbmle)
 library(brglm2)
 library(DHARMa)
@@ -21,21 +28,60 @@ library(sandwich)
 library(sf)
 library(sjPlot)
 library(terra)
-library(tidyr)
+library(tidyverse)
+
+rm(list=ls()) #Clean the workspace
+
+#NOTE: Não entendi pq isso. Não liga aos dados recentes! EXCLUIR
 #==========================================================================================================================
-IpomoeaData<-openxlsx::read.xlsx("IpomoeaAbund.xlsx")
-IpomoeaData$Ocorrencia%>%table()
-IpomoeaData$Geofaceis <- toupper(trimws(IpomoeaData$Geofaceis))
-unique(IpomoeaData$Geofaceis)
-#patch_data<-readRDS("patches_data.rds")
-SnShape<-st_read("GeoAmbFac_2022_img21_Amplo_v03.shp")
-SnShape<-SnShape%>%filter(!(GeoF_2021%in% c("Mata Alta","Floresta Ombrófila","Lagoa Temporária","Samambaial","Solo Exposto",
-                                            "Buritizal","Pasto","Lagoa Permanente",
-                          "Estruturas Relativas à Mineração")))%>%mutate(GeoF_2021= toupper(trimws(GeoF_2021)))
-SnShape2<-SnShape%>%group_by(GeoF_2021) %>%summarize(area_total_km2 = sum(as.numeric(st_area(geometry)),
-                                              na.rm = TRUE) / 1000000) %>%st_drop_geometry()
-IpomoeaData2<-IpomoeaData %>%left_join(SnShape2, by = c("Geofaceis" = "GeoF_2021"))
-IpomoeaData2<-IpomoeaData2%>%rename(AreaTot=area_total_km2)
+#IpomoeaData<-openxlsx::read.xlsx("IpomoeaAbund.xlsx")
+#IpomoeaData$Ocorrencia%>%table()
+#IpomoeaData$Geofaceis <- toupper(trimws(IpomoeaData$Geofaceis))
+#unique(IpomoeaData$Geofaceis)
+##patch_data<-readRDS("patches_data.rds")
+#SnShape<-st_read("GeoAmbFac_2022_img21_Amplo_v03.shp")
+#SnShape<-SnShape%>%filter(!(GeoF_2021%in% c("Mata Alta","Floresta Ombrófila","Lagoa Temporária","Samambaial","Solo Exposto",
+#                                            "Buritizal","Pasto","Lagoa Permanente",
+#                          "Estruturas Relativas à Mineração")))%>%mutate(GeoF_2021= toupper(trimws(GeoF_2021)))
+#SnShape2<-SnShape%>%group_by(GeoF_2021) %>%summarize(area_total_km2 = sum(as.numeric(st_area(geometry)),
+#                                              na.rm = TRUE) / 1000000) %>%st_drop_geometry()
+#IpomoeaData2<-IpomoeaData %>%left_join(SnShape2, by = c("Geofaceis" = "GeoF_2021"))
+#IpomoeaData2<-IpomoeaData2%>%rename(AreaTot=area_total_km2)
+#IpomoeaData2%>%dplyr::glimpse()
+#NOTE: Não entendi pq vc criou `IpomoeaData2`
+
+SnShape<-st_read("Data/PRJ112_DadosIpomoea_Densidades_v00.shp")
+geof<-st_read("Data/Serra_Norte_2024_wLoc.shp")
+
+SnShape$Geofacie%>%unique()
+
+  
+  
+#Cria dados de abundância
+IpomoeaAbund<- SnShape%>%
+  st_drop_geometry()%>%  #Necessário para performance
+# Arruma diferentes grafias para Vegetação rupestre aberta
+# Junta Vegetação rupestre aberta e arbustiva em um único grupo de 
+  mutate(Geofacie=
+ ifelse(Geofacie %in% 
+        c("vegetação rupestre aberta","Vegetação Rupestre Aberta","Vegetação Rupestre Arbustiva"), #Se a geofacie for uma dessas, então...
+          "Vegetação Rupestre", Geofacie))%>%                                                       # agrupa em "Vegetação Rupestre"
+      #filtra campo brejoso
+  filter(Geofacie != "Campo Brejoso")
+ 
+
+IpomoeaAbund$Geofacie%>%unique()
+
+# Referências para análises
+IpomoeaAbund$Geofacie<- relevel(as.factor(IpomoeaAbund$Geofacie), ref = "Vegetação Rupestre") #Define vegetação rupestre como referência
+IpomoeaAbund$PLATO<- relevel(as.factor(IpomoeaAbund$PLATO), ref = "N1") #Define N1 como referência
+
+
+# Verifica distribuição das manchas de habitat entre os platôs
+# Note grande desigualdade marcada pelo baixo nº de lajedos e campos graminosos em N2 e N3, o que pode afetar a análise de abundância
+IpomoeaAbund%>%dplyr::select(Geofacie,PLATO)%>%table()
+
+IpomoeaAbund_noN23<-IpomoeaAbund%>%filter(!(PLATO %in% c("N2","N3"))) #Remove N2 e N3 para conseguir analisar lajedo e campo graminoso de forma adequada.
 
 #==========================================================================================================
 #1)A geoface determina a abundância?
@@ -43,7 +89,58 @@ IpomoeaData2<-IpomoeaData2%>%rename(AreaTot=area_total_km2)
 #Pois ocorre nos gaps das gramineas
 #Lajedo e cangas é abundante porém menos densa, seria devido ao tamanho da área?
 #==========================================================================================================
-IpomoeaAbund<-IpomoeaData2 %>% 
+
+modAbundZI<- glmmTMB(N_Ind_Tota ~ Geofacie*PLATO ,data = IpomoeaAbund,
+                      ziformula = ~0,family = nbinom2)
+
+# Warning: dropping columns from rank-deficient conditional model: GeofacieCampo graminoso:PLATON2 indica
+# Indica que Geofacie * PLATO é a melhor solução visto que Geofacie não são comparáveis entre todos os Platôs e vice-versa!
+
+
+performance::check_zeroinflation(modAbundZI) #Não parece necessitar de zero-inflado
+
+
+library(MuMIn)
+options(na.action = "na.fail") # Necessário para o dredge
+
+dredge_model<-dredge(modAbundZI)
+
+
+best_model<-get.models(dredge_model, subset = 1)[[1]] # pega o melhor modelo (no caso é o modelo completo)
+
+best_model%>%summary()
+modAbundZI%>%summary()
+
+plot(ggeffects::predict_response(best_model, terms = c("Geofacie", "PLATO")))+
+  theme_classic(base_size=26)+theme(legend.position="bottom")
+
+
+# Agora retirando N2 e N3 pois a falta de lajedos e campos graminosos tornam esses platôs pouco comparáveis
+modAbundZInoN23<- glmmTMB(N_Ind_Tota ~ Geofacie*PLATO ,data = IpomoeaAbund_noN23,
+                      ziformula = ~0,family = nbinom2)
+
+performance::check_zeroinflation(modAbundZInoN23)
+
+summary(modAbundZInoN23)
+
+plot(ggeffects::predict_response(modAbundZInoN23, terms = c("Geofacie", "PLATO")))+
+  theme_classic(base_size=26)+theme(legend.position="bottom")
+
+
+
+IpomoeaAbund%>%glimpse()
+
+
+
+
+# FIM DA AJUDA ==========================================================================================================
+
+
+
+
+
+
+
   group_by(Geofaceis,Parc,Local,X,Y) %>%
   summarize(AbundTot=sum(Ocorrencia, na.rm = TRUE), .groups = "drop")
 # Adicionando a fórmula de zero-inflação (ziformula = ~1 assume que a inflação é constante)
