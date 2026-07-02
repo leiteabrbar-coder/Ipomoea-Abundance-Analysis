@@ -4,7 +4,6 @@
 #' 
 #'              ABRAÃO B. LEITE
 #'#################################################################
-
 library(bbmle)
 library(brglm2)
 library(DHARMa)
@@ -105,24 +104,13 @@ plot(ggeffects::predict_response(best_model, terms = c("Geofacie", "PLATO")))+
 
 # Eu prefiro esse padrão de gráfico
 
-# 1. Extrai as médias e erros
-library(emmeans)
-library(ggplot2)
-library(dplyr)
-library(multcomp)
 
-# 1. Extrai as médias estimadas do modelo
 em_regua <- emmeans(modAbundZI, ~ Geofacie | PLATO, type = "response")
-
-# 2. Calcula as letras de Tukey (Compact Letter Display) DENTRO de cada Platô
 letras_tukey <- cld(em_regua, Letters = letters, adjust = "tukey") %>% 
   as.data.frame()
-
-# 3. Identificação dinâmica das colunas para evitar conflitos de versão
 col_resposta <- intersect(c("response", "rate"), colnames(letras_tukey))
 col_erro     <- intersect(c("SE", "std.error"), colnames(letras_tukey))
 
-# Limpa espaços em branco criados pelo cld() na coluna de letras
 letras_tukey$.group <- trimws(letras_tukey$.group)
 
 # 4. Filtragem dos dados (remove o erro gigante do Lajedo no Platô 4 e NAs)
@@ -130,23 +118,19 @@ dados_grafico <- letras_tukey %>%
   filter(!is.na(.data[[col_resposta]])) %>% 
   filter(.data[[col_erro]] < 100)
 
-# 5. Criando o gráfico unificado com facetas e letras
+
 plot_letras <- ggplot(dados_grafico, aes(x = Geofacie, y = .data[[col_resposta]], fill = Geofacie)) +
-  # Barras de médias
   geom_bar(stat = "identity", color = "black", width = 0.6, alpha = 0.9) +
-  # Barras de erro (garantindo mínimo zero)
   geom_errorbar(aes(
     ymin = pmax(0, .data[[col_resposta]] - .data[[col_erro]]), 
     ymax = .data[[col_resposta]] + .data[[col_erro]]
   ), width = 0.2, color = "black", linewidth = 0.6) +
-  # ADICIONA AS LETRAS ACIMA DA BARRA DE ERRO
   geom_text(aes(
     y = .data[[col_resposta]] + .data[[col_erro]], 
     label = .group
   ), vjust = -0.5, size = 4, fontface = "bold") +
-  # Divisão em 4 janelas (2x2)
   facet_wrap(~ PLATO, scales = "free_y", ncol = 2) +
-  # Rótulos e estética
+ 
   labs(
     title = "Abundância de Ipomoea com Comparações de Tukey",
     subtitle = "Letras diferentes indicam diferença significativa (p < 0.05) dentro de cada platô",
@@ -167,11 +151,7 @@ plot_letras <- ggplot(dados_grafico, aes(x = Geofacie, y = .data[[col_resposta]]
   ) +
   scale_fill_viridis_d(option = "viridis", begin = 0.2, end = 0.8)
 
-# Exibe o painel completo no RStudio
 print(plot_letras)
-
-# Para salvar o gráfico finalizado na sua pasta de trabalho:
-# ggsave("Painel_Abundancia_Letras_Tukey.png", plot = plot_letras, width = 9, height = 8, dpi = 300)
 
 # ggsave("Painel_Abundancia_Platos.png", plot = plot_final, width = 8, height = 7, dpi = 300)
 
