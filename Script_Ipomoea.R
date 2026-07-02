@@ -31,7 +31,7 @@ library(sjPlot)
 library(terra)
 library(tidyverse)
 
-rm(list=ls()) #Clean the workspace
+#rm(list=ls()) #Clean the workspace
 
 
 
@@ -103,8 +103,81 @@ best_model%>%summary()
 plot(ggeffects::predict_response(best_model, terms = c("Geofacie", "PLATO")))+
   theme_classic(base_size=26)+theme(legend.position="bottom")
 
+# Eu prefiro esse padrão de gráfico
 
+# 1. Extrai as médias e erros
+library(emmeans)
+library(ggplot2)
+library(dplyr)
+library(multcomp)
+
+# 1. Extrai as médias estimadas do modelo
+em_regua <- emmeans(modAbundZI, ~ Geofacie | PLATO, type = "response")
+
+# 2. Calcula as letras de Tukey (Compact Letter Display) DENTRO de cada Platô
+letras_tukey <- cld(em_regua, Letters = letters, adjust = "tukey") %>% 
+  as.data.frame()
+
+# 3. Identificação dinâmica das colunas para evitar conflitos de versão
+col_resposta <- intersect(c("response", "rate"), colnames(letras_tukey))
+col_erro     <- intersect(c("SE", "std.error"), colnames(letras_tukey))
+
+# Limpa espaços em branco criados pelo cld() na coluna de letras
+letras_tukey$.group <- trimws(letras_tukey$.group)
+
+# 4. Filtragem dos dados (remove o erro gigante do Lajedo no Platô 4 e NAs)
+dados_grafico <- letras_tukey %>% 
+  filter(!is.na(.data[[col_resposta]])) %>% 
+  filter(.data[[col_erro]] < 100)
+
+# 5. Criando o gráfico unificado com facetas e letras
+plot_letras <- ggplot(dados_grafico, aes(x = Geofacie, y = .data[[col_resposta]], fill = Geofacie)) +
+  # Barras de médias
+  geom_bar(stat = "identity", color = "black", width = 0.6, alpha = 0.9) +
+  # Barras de erro (garantindo mínimo zero)
+  geom_errorbar(aes(
+    ymin = pmax(0, .data[[col_resposta]] - .data[[col_erro]]), 
+    ymax = .data[[col_resposta]] + .data[[col_erro]]
+  ), width = 0.2, color = "black", linewidth = 0.6) +
+  # ADICIONA AS LETRAS ACIMA DA BARRA DE ERRO
+  geom_text(aes(
+    y = .data[[col_resposta]] + .data[[col_erro]], 
+    label = .group
+  ), vjust = -0.5, size = 4, fontface = "bold") +
+  # Divisão em 4 janelas (2x2)
+  facet_wrap(~ PLATO, scales = "free_y", ncol = 2) +
+  # Rótulos e estética
+  labs(
+    title = "Abundância de Ipomoea com Comparações de Tukey",
+    subtitle = "Letras diferentes indicam diferença significativa (p < 0.05) dentro de cada platô",
+    x = "Geofacie",
+    y = "Número Médio de Indivíduos"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(face = "bold", size = 11),
+    strip.background = element_rect(fill = "gray95"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10, color = "black"),
+    axis.text.y = element_text(size = 10, color = "black"),
+    axis.title = element_text(face = "bold", size = 12),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    plot.subtitle = element_text(size = 10, hjust = 0.5, face = "italic"),
+    panel.grid.minor = element_blank()
+  ) +
+  scale_fill_viridis_d(option = "viridis", begin = 0.2, end = 0.8)
+
+# Exibe o painel completo no RStudio
+print(plot_letras)
+
+# Para salvar o gráfico finalizado na sua pasta de trabalho:
+# ggsave("Painel_Abundancia_Letras_Tukey.png", plot = plot_letras, width = 9, height = 8, dpi = 300)
+
+# ggsave("Painel_Abundancia_Platos.png", plot = plot_final, width = 8, height = 7, dpi = 300)
+
+#################################################################################################
 # Agora retirando N2 e N3 pois a falta de lajedos e campos graminosos tornam esses platôs pouco comparáveis
+############################################################################################################
 IpomoeaAbund_noN23<-IpomoeaAbund %>% 
   filter(PLATO %in% c("N1", "N4/N5"))
 modAbundZInoN23<- glmmTMB(N_Ind_Tota ~ Geofacie*PLATO ,data = IpomoeaAbund_noN23,
@@ -136,11 +209,8 @@ plot_df <- as.data.frame(pred_data) %>%
   rename(Geofacie = x, PLATO = group) %>% 
   left_join(letras_data, by = c("Geofacie", "PLATO"))
 
-# Gostei desse tipo de gráfico
+# Gostei desse tipo de gráfico também
 # Preciso confirmar com os demais se será útil
-
-library(dplyr)
-library(ggplot2)
 
 # 1. Ajustando a tabela para remover o Infinito do Lajedo N4/N5
 plot_df_limpo <- plot_df %>%
@@ -196,7 +266,4 @@ tabela_zeros_N4N5 <- IpomoeaAbund %>%
 
 # Visualiza o dataframe gerado
 print(tabela_zeros_N4N5)
-
-# FIM DA AJUDA ==========================================================================================================
-
 
