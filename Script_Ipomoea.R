@@ -84,9 +84,7 @@ mutate(Geofacie = case_match(Geofacie,
   mutate(Geofacie = droplevels(as.factor(Geofacie)),
          PLATO2 = as.factor(PLATO2))
 
-# ==============================================================================
-# GRÁFICO EXPLORATÓRIO (DISTRIBUIÇÃO DE FREQUÊNCIA DA ABUNDÂNCIA)
-# ==============================================================================
+# 
 
 # Encontra o valor máximo para definir o último corte
 max_val <- max(IpomoeaAbund$N_Ind_Tota, na.rm = TRUE)
@@ -119,23 +117,15 @@ ggplot(IpomoeaAbund, aes(x = Faixa_10, fill = Faixa_10 == "0")) +
 ggsave("PlotParc.png", width = 8, height = 7, dpi = 300)
 
 
-# ==============================================================================
-# MÓDULO 1: MODELAGEM LOCAL GERAL (GEOFÁCIES * PLATÔ)
-# ==============================================================================
 
 
 
-# ==============================================================================
-# SCRIPT DE ANÁLISE: MODELAGEM DE ABUNDÂNCIA DE IPOMOEA EM CANGAS DE CARAJÁS
-# ==============================================================================
 
+ ##########################################################################################################
+#                                MODELAGEM ABUNDÂNCIA
+###############################################################################################################
 
-
-# --- 1. CONFIGURAÇÃO E AJUSTE DO MODELO BASE ---
-# Nota: Usamos o modelo aditivo (+) para evitar problemas de convergência 
-# causados pela falta de dados em certas combinações de Geofacie e Platô.
-options(na.action = "na.fail") # Exigido pelo pacote MuMIn para rodar o dredge
-
+options(na.action = "na.fail") 
 modAbundZI <- glmmTMB(N_Ind_Total ~ Geofacie*PLATO2, 
                       data = IpomoeaAbund,
                       ziformula = ~ Geofacie, 
@@ -159,32 +149,47 @@ summary(best_model)
 ####################################################################################
 #                          PÓS TESTE
 ##################################################################################
-#Comparação por PLATO
-postCondPlato <- emmeans(best_model, specs = pairwise ~Geofacie|PLATO2, component = "cond", type = "response")
-postCondPlato$emmeans
-postCondPlato$contrasts
-
 #Comparação por Geofácie
 postCondGeof<- emmeans(best_model, specs = pairwise ~ PLATO2 | Geofacie, component = "cond", type = "response")
 postCondGeof$emmeans
 postCondGeof$contrasts
-
-
-
-# Gerando as letras para as Geofácies dentro de cada Platô
-CondLetters<- cld(postCondPlato, Letters = letters, adjust = "tukey") %>%
+CondLettersGeof<- cld(postCondGeof, Letters = letters, adjust = "tukey") %>%
   as.data.frame() %>%
   # Remove os valores que o modelo não conseguiu estimar (nonEst) para não quebrar o gráfico
   filter(!is.na(response))
-
+CondLettersGeof<-CondLettersGeof%>%
+  mutate(Geofacie = as.factor(Geofacie),
+         .group = trimws(.group))
+ggplot(CondLettersGeof, aes(x = PLATO2, y = response, color = PLATO2)) + 
+  geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL), width = 0.2, linewidth = 0.8) +
+  geom_point(size = 3.5) +
+  geom_text(aes(y = asymp.UCL * 1.15, label = .group), size = 4.5, fontface = "bold", color = "black") +
+  facet_wrap(~Geofacie, scales = "free_y") + 
+  scale_color_brewer(palette = "Set1") +
+  labs(x = "Geofácie",y = "Abundância de Indivíduos (Média ± IC 95%)") +
+  theme_classic(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"),
+        axis.text.x = element_text(),
+        strip.background = element_rect(fill = "gray95"),
+        strip.text = element_text(face = "bold"),
+        legend.position = "none") # Esconde a legenda pois os nomes já estão no eixo X
+ggsave("PlotGeo.tiff", width = 7, height = 6, dpi = 300, device = "tiff")
 ##################################################################################
 #                      CONDITIONAL PLOT
 ##################################################################################
+#Comparação por PLATO
+postCondPlato <- emmeans(best_model, specs = pairwise ~Geofacie|PLATO2, component = "cond", type = "response")
+postCondPlato$emmeans
+postCondPlato$contrasts
+CondLettersPlato<- cld(postCondPlato, Letters = letters, adjust = "tukey") %>%
+  as.data.frame() %>%
+  # Remove os valores que o modelo não conseguiu estimar (nonEst) para não quebrar o gráfico
+  filter(!is.na(response))
 # Garante que o R trate a Geofacie como um fator e limpa as letrinhas
-CondLetters<- CondLetters %>%
+CondLettersPlato<- CondLettersPlato %>%
   mutate(Geofacie = as.factor(Geofacie),
          .group = trimws(.group))
-CondPlot <- ggplot(CondLetters, aes(x = Geofacie, y = response, color = Geofacie)) + 
+ggplot(CondLettersPlato, aes(x = Geofacie, y = response, color = Geofacie)) + 
   geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL), width = 0.2, linewidth = 0.8) +
   geom_point(size = 3.5) +
   geom_text(aes(y = asymp.UCL * 1.15, label = .group), size = 4.5, fontface = "bold", color = "black") +
@@ -193,86 +198,43 @@ CondPlot <- ggplot(CondLetters, aes(x = Geofacie, y = response, color = Geofacie
   labs(x = "Geofácie",y = "Abundância de Indivíduos (Média ± IC 95%)") +
   theme_classic(base_size = 12) +
   theme(plot.title = element_text(face = "bold"),
-        axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text.x = element_text(),
         strip.background = element_rect(fill = "gray95"),
         strip.text = element_text(face = "bold"),
         legend.position = "none") # Esconde a legenda pois os nomes já estão no eixo X
-print(CondPlot)
+ggsave("PlotPlato.tiff", width = 7, height = 6, dpi = 300, device = "tiff")
 
 ############################################################################################
 #                       ZI PLOT
 ############################################################################################
-library(dplyr)
-library(ggplot2)
 #ComparaçãoZi
 postZi <- emmeans(best_model, specs = pairwise ~ Geofacie, component = "zi", type = "response")
 postZi$emmeans
 postZi$contrasts
-# ==============================================================================
-# 1. PROCESSAMENTO E ORDENAÇÃO COMPLETA DOS DADOS (PASSO A PASSO)
-# ==============================================================================
 ZiLetters_Ordenado <- ZiLetters %>%
-  # PASSO 1: Transforma os valores de proporção (0-1) do emmeans para porcentagem (0-100%)
   mutate(prob_pct = response * 100,
          lcl_pct = asymp.LCL * 100,
          ucl_pct = asymp.UCL * 100) %>%
-  # PASSO 2: Limpa os fatores e remove espaços das letrinhas
   mutate(Geofacie = as.factor(Geofacie),
          .group = trimws(.group)) %>%
-  # PASSO 3: Agora sim, ordena de forma decrescente (O R vai encontrar o prob_pct criado no Passo 1)
   arrange(desc(prob_pct)) %>%
-  # PASSO 4: Trava essa ordem decrescente na memória do R
   mutate(Geofacie = factor(Geofacie, levels = unique(Geofacie)))
-
-# ==============================================================================
-# 2. MONTAGEM E EXIBIÇÃO DO GRÁFICO (DO MAIOR PARA O MENOR ZERO ESTRUTURAL)
-# ==============================================================================
-ZiPlot <- ggplot(ZiLetters_Ordenado, aes(x = Geofacie, y = prob_pct, color = Geofacie)) +
-  
-  # Barras de intervalo de confiança coloridas por Geofácie
+ggplot(ZiLetters_Ordenado, aes(x = Geofacie, y = prob_pct, color = Geofacie)) +
   geom_errorbar(aes(ymin = lcl_pct, ymax = ucl_pct), width = 0.15, linewidth = 1) +
-  
-  # Ponto central colorido por Geofácie
   geom_point(size = 4.5) +
-  
-  # Aplica a paleta Set1 de cores fixas e contrastantes
   scale_color_brewer(palette = "Set1") +
-  
-  # Letrinhas do pós-teste automáticas e pretas
   geom_text(aes(y = ucl_pct + 4, label = .group), size = 5, fontface = "bold", color = "black") +
-  
-  # Limite fixo do eixo Y
   scale_y_continuous(limits = c(0, 110)) +
-  
-  # Legendas em inglês (Eixos e Títulos)
-  labs(x = "Geo-facies", 
-       y = "Structural Zero Probability (%)",
-       title = "Probability of Habitat Inadequacy by Geo-facies",
-       subtitle = "Different letters indicate significant differences between habitats (Sidak, p < 0.05)") +
-  
+  labs(x = "Geo-facies",y = "Structural Zero Probability (%)",) +
   theme_classic(base_size = 14) +
   theme(plot.title = element_text(face = "bold"),
-        axis.text.x = element_text(angle = 15, hjust = 1),
+        axis.text.x = element_text(hjust = 1),
         legend.position = "none")
+ggsave("ZiPlot.tiff", width = 7, height = 6, dpi = 300, device = "tiff")
 
-# Exibe o gráfico finalizado na sua tela
-print(ZiPlot)
-
-# Salva o arquivo em alta resolução na sua pasta do projeto
-ggsave("ZiPlot_Final.tiff", width = 7, height = 6, dpi = 300, device = "tiff")
-
-# ==============================================================================
-## ==============================================================================
-# MÓDULO 2: MODELAGEM DA MATRIZ CIRCUNDANTE (BUFFER VETORIAL DE 5 METROS)
-# ==============================================================================
-
-# --- 0. CARREGAR PACOTES NECESSÁRIOS ---
-library(sf)        # Para manipulação de dados espaciais (Shapefiles e Geometria)
-library(dplyr)     # Para manipulação, filtragem e organização de dados
-library(tidyr)     # Para pivotagem de tabelas (pivot_wider)
-library(glmmTMB)   # Para ajuste de modelos zero-inflados de contagem
-library(MuMIn)     # Para seleção automatizada de modelos via AIC
-library(ggplot2)   # Para visualização gráfica das predições
+##################################################################################
+#                            MODELAGEM MATRIZ CIRCUNDANTE
+##############################################################################################
 
 # --- 1. UNIÃO E PREPARAÇÃO DOS DADOS ESPACIAIS ---
 # Une a planilha de abundância externa ao Shapefile geográfico original das parcelas
