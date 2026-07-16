@@ -2,6 +2,10 @@
 #' Script para análise da abundância de Ipomoea 
 #' em diferentes geofácies
 #' 
+#' Perguntas
+#i)	Há diferença na abundância e probabilidade de ocorrência Ipomoea cavalcantei conforme as diferentes geofácies?
+#ii)A matriz circundante afeta a abundância de diferentes geo-ambientes? 
+#' 
 #'              ABRAÃO B. LEITE
 #'#################################################################
 library(bbmle)
@@ -29,308 +33,418 @@ library(sf)
 library(sjPlot)
 library(terra)
 library(tidyverse)
+library(tidyr)
+################################################################################
+# SCRIPT DE ANÁLISE POPULACIONAL E ESPACIAL DE IPOMOEA EM CARAJÁS
+# Módulo 1: Diferenças Locais Gerais (Geofácies vs. Platôs) com Zero-Inflação
+# Módulo 2: Efeito do Microhabitat Circundante (Buffer Vetorial de 3m)
+################################################################################
 
-#rm(list=ls()) #Clean the workspace
+
+# Configuração global obrigatória para o pacote MuMIn (dredge) não falhar
 
 
+# 1. CARREGAMENTO DOS DADOS ORIGINAIS
+SnShape <- st_read("Data/PRJ112_DadosIpomoea_Densidades_v00.shp")
+geof <- st_read("Data/Serra_Norte_2024_wLoc.shp")
+IpomoeaData <- openxlsx::read.xlsx("PRJ152_DadosIpomoea_Densidades_v05.xlsx")%>%
+mutate(ID_PARCELA= trimws(as.character(ID_PARCELA)),
+       Geofacie= trimws(as.character(Geofacie)),
+       Geofacie2= trimws(as.character(Geofacie2)),
+       PLATO2= trimws(as.character(PLATO2)))
 
-SnShape<-st_read("Data/PRJ112_DadosIpomoea_Densidades_v00.shp")
-geof<-st_read("Data/Serra_Norte_2024_wLoc.shp")
+# 1. Ajustar o nome e o tipo da coluna no Shapefile para garantir o casamento dos dados
+SnShape_df <- SnShape %>%
+  st_drop_geometry() %>%
+  rename(ID_PARCELA = ID_PARCELA) %>% # Garante o nome em maiúsculo se estiver diferente
+  mutate(ID_PARCELA = trimws(as.character(ID_PARCELA)))
+table(IpomoeaData $Geofacie, IpomoeaData $PLATO2)
+# 2. Garantir que a coluna no Excel também seja texto
+IpomoeaData <- IpomoeaData %>%
+  mutate(ID_PARCELA = as.character(ID_PARCELA))
 
-SnShape$Geofacie%>%unique()
-
+# 3. Fazer o join por ID_PARCELA, padronizar e filtrar
+IpomoeaAbund <- SnShape_df %>%
+  left_join(IpomoeaData, by = "ID_PARCELA") %>%
   
-  
-#Cria dados de abundância
-IpomoeaAbund<- SnShape%>%
-  st_drop_geometry()%>%  #Necessário para performance, transforma o shp em dataframe
-# Arruma diferentes grafias para Vegetação rupestre aberta
-# Junta Vegetação rupestre aberta e arbustiva em um único grupo de 
-  mutate(Geofacie=
- ifelse(Geofacie %in% 
-        c("vegetação rupestre aberta","Vegetação Rupestre Aberta","Vegetação Rupestre Arbustiva"), #Se a geofacie for uma dessas, então...
-          "Vegetação Rupestre", Geofacie))%>%                                                       # agrupa em "Vegetação Rupestre"
-      #filtra campo brejoso, pois não é representativo em N2 e N3
-  filter(Geofacie != "Campo Brejoso")
- 
+  # Padroniza as grafias usando a coluna do Excel (Geofacie2)
+  mutate(Geofacie = ifelse(Geofacie2 %in% c("vegetação rupestre aberta", 
+                                            "Vegetação Rupestre Aberta", 
+                                            "Vegetação Rupestre Arbustiva"), 
+                           "Vegetação Rupestre", Geofacie2))%>%
+   # Remove o Campo Brejoso
+  filter(Geofacie != "Campo Brejoso")%>%
+mutate(Geofacie = case_match(Geofacie,
+                             "Campo Graminoso"    ~ "Grassland",
+                             "Lajedo"             ~ "Rocky outcrop",
+                             "Mata Baixa"         ~ "Low forest",
+                             "Mata baixa"         ~ "Low forest",
+                             "Vegetação Rupestre" ~ "Rupestrian vegetation",
+                             .default =Geofacie)) %>%
+  mutate(Geofacie = droplevels(as.factor(Geofacie)),
+         PLATO2 = as.factor(PLATO2))
 
-IpomoeaAbund$Geofacie%>%unique()
+# ==============================================================================
+# GRÁFICO EXPLORATÓRIO (DISTRIBUIÇÃO DE FREQUÊNCIA DA ABUNDÂNCIA)
+# ==============================================================================
 
-# Referências para análises
-IpomoeaAbund$Geofacie<- relevel(as.factor(IpomoeaAbund$Geofacie), ref = "Vegetação Rupestre") #Define vegetação rupestre como referência
-IpomoeaAbund$PLATO<- relevel(as.factor(IpomoeaAbund$PLATO), ref = "N1") #Define N1 como referência
-
-
-# Verifica distribuição das manchas de habitat entre os platôs
-# Note grande desigualdade marcada pelo baixo nº de lajedos e campos graminosos em N2 e N3, o que pode afetar a análise de abundância
-IpomoeaAbund%>%dplyr::select(Geofacie,PLATO)%>%table()
-
-IpomoeaAbund_noN23<-IpomoeaAbund%>%filter(!(PLATO %in% c("N2","N3"))) #Remove N2 e N3 para conseguir analisar lajedo e campo graminoso de forma adequada.
-
-#########################################################################################
-#1)A geoface determina a abundância?
-#########################################################################################
-#À partir daqui a modelagem está perfeita!
-modAbundZI<- glmmTMB(N_Ind_Tota ~ Geofacie*PLATO ,data = IpomoeaAbund,
-                     ziformula = ~Geofacie,family = nbinom2)
-modAbundZI$fit$convergence # Deve ser 0, Perfect!
-
-performance::check_zeroinflation(modAbundZI) #Ratio: 1.00 Perfect! 
-
-summary(modAbundZI)
-
-options(na.action = "na.fail") # Necessário para o dredge
-
-dredge_model<-dredge(modAbundZI) # Função maravilhosa, já faz as combinações de variáveis, testando assim diferentes modelos
-
-
-best_model<-get.models(dredge_model, subset = 1)[[1]] # pega o melhor modelo dentre todos aqueles gerados em dredge_model 
-#(no caso é o modelo completo)
-
-best_model%>%summary()
-#modAbundZI%>%summary() Não vejo necessidade dessa linha, uma vez que já teremos e sabemos qual o melhor modelo
-
-#Os nomes de legendas etc... deveram ser definidos para o painel do simpósio
-plot(ggeffects::predict_response(best_model, terms = c("Geofacie", "PLATO")))+
-  theme_classic(base_size=26)+theme(legend.position="bottom")
-
-# Eu prefiro esse padrão de gráfico
-
-
-em_values<- emmeans(modAbundZI, ~ Geofacie | PLATO, type = "response")
-letras_tukey <- cld(em_values, Letters = letters, adjust = "tukey") %>% 
-  as.data.frame()
-col_resposta <- intersect(c("response", "rate"), colnames(letras_tukey))
-col_erro     <- intersect(c("SE", "std.error"), colnames(letras_tukey))
-
-letras_tukey$.group <- trimws(letras_tukey$.group)
-
-# 4. Filtragem dos dados (remove o erro gigante do Lajedo no Platô 4 e NAs)
-dados_grafico <- letras_tukey %>% 
-  filter(!is.na(.data[[col_resposta]])) %>% 
-  filter(.data[[col_erro]] < 100)
-
-
-plot_letras <- ggplot(dados_grafico, aes(x = Geofacie, y = .data[[col_resposta]], fill = Geofacie)) +
-  geom_bar(stat = "identity", color = "black", width = 0.6, alpha = 0.9) +
-  geom_errorbar(aes(
-    ymin = pmax(0, .data[[col_resposta]] - .data[[col_erro]]), 
-    ymax = .data[[col_resposta]] + .data[[col_erro]]
-  ), width = 0.2, color = "black", linewidth = 0.6) +
-  geom_text(aes(
-    y = .data[[col_resposta]] + .data[[col_erro]], 
-    label = .group
-  ), vjust = -0.5, size = 4, fontface = "bold") +
-  facet_wrap(~ PLATO, scales = "free_y", ncol = 2) +
- 
-  labs(
-    title = "Abundância de Ipomoea com Comparações de Tukey",
-    subtitle = "Letras diferentes indicam diferença significativa (p < 0.05) dentro de cada platô",
-    x = "Geofacie",
-    y = "Número Médio de Indivíduos"
-  ) +
-  theme_bw() +
-  theme(
-    legend.position = "none",
-    strip.text = element_text(face = "bold", size = 11),
-    strip.background = element_rect(fill = "gray95"),
-    axis.text.x = element_text(angle = 45, hjust = 1, size = 10, color = "black"),
-    axis.text.y = element_text(size = 10, color = "black"),
-    axis.title = element_text(face = "bold", size = 12),
-    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
-    plot.subtitle = element_text(size = 10, hjust = 0.5, face = "italic"),
-    panel.grid.minor = element_blank()
-  ) +
-  scale_fill_viridis_d(option = "viridis", begin = 0.2, end = 0.8)
-
-print(plot_letras)
-
-# ggsave("Painel_Abundancia_Platos.png", plot = plot_final, width = 8, height = 7, dpi = 300)
-
-#################################################################################################
-# Agora retirando N2 e N3 pois a falta de lajedos e campos graminosos tornam esses platôs pouco comparáveis
-#1)A geoface determina a abundância?
-#2)Há diferença na probabilidade ocorrência entre as geofácies?
-############################################################################################################
-IpomoeaAbund_noN23<-IpomoeaAbund %>% 
-  filter(PLATO %in% c("N1", "N4/N5"))
-modAbundZInoN23<- glmmTMB(N_Ind_Tota ~ Geofacie*PLATO ,data = IpomoeaAbund_noN23,
-                      ziformula = ~Geofacie,family = nbinom2)
-
-performance::check_zeroinflation(modAbundZInoN23)
-modAbundZInoN23$fit$convergence
-summary(modAbundZInoN23)
-emm_abund <- emmeans(modAbundZInoN23, specs = ~ Geofacie * PLATO, type = "response")
-summary(pairs(emm_abund, by = "PLATO"), adjust = "tukey")
-cld_abund <- cld(emm_abund, by = "PLATO", adjust = "tukey", Letters = letters)
-
-# Abaixo serão construídos os gráficos
-#ATENÇÃO: A barra de erro padrão infinita em Lajedo N4/N5 é porque os 21 plots são todos 0, ou seja, em nenhum há Ipomoea
-IpomoeaAbund%>%dplyr::select(Geofacie,PLATO)%>%table()
-IpomoeaAbund %>%
-  filter(Geofacie == "Lajedo", PLATO == "N4/N5") %>%
-  dplyr::select(N_Ind_Tota) %>%
-  table()
-
-#N4/N5 têm uma alta porcentagem de zeros
-tabela_zeros_N4N5 <- IpomoeaAbund %>%
-  # Filtra apenas o platô de interesse
-  filter(PLATO == "N4/N5") %>%
-  # Agrupa por Geofacie
-  group_by(Geofacie) %>%
-  # Calcula as estatísticas de ausência
-  summarise(
-    Quantidade_Zeros = sum(N_Ind_Tota == 0),
-    Total_Parcelas   = n(),
-    Percentual_Zeros = (Quantidade_Zeros / Total_Parcelas) * 100
-  )
-
-# Visualiza o dataframe gerado
-print(tabela_zeros_N4N5)
-
-# 1. Ajuste fino e isolamento completo dos dados para o gráfico
-plotAbund<- as.data.frame(resultado_pos_hoc) %>% 
-  mutate(
-    letra = trimws(.group),
-    # Garante limites válidos para os intervalos de confiança
-    LCL_adjusted = ifelse(is.na(asymp.LCL) | asymp.LCL < 0, 0, asymp.LCL),
-    UCL_adjusted = ifelse(is.na(asymp.UCL) | asymp.UCL > 10000 | asymp.UCL == Inf, response, asymp.UCL),
-    
-    # Recalcula o intervalo de forma limpa para o Campo graminoso em N4/N5 usando o SE
-    UCL_adjusted= ifelse(Geofacie == "Campo graminoso" & PLATO == "N4/N5", response + (1.96 * SE), UCL_adjusted),
-    LCL_adjusted= ifelse(Geofacie == "Campo graminoso" & PLATO == "N4/N5", max(0, response - (1.96 * SE)), LCL_adjusted),
-    
-    # Define a posição vertical segura de cada letra para evitar sobreposição
-    posicao_letra = ifelse(Geofacie == "Lajedo" & PLATO == "N4/N5", response + 1.2, UCL_adjusted + 1.2)
-  )
-
-# 2. Construção do Gráfico com sintaxe atualizada (linewidth)
-ggplot(plotAbund, aes(x = Geofacie, y = response, color = factor(PLATO), group = factor(PLATO))) +
-  geom_errorbar(aes(ymin = LCL_adjusted, ymax = UCL_adjusted), 
-                width = 0.12, position = position_dodge(0.4), linewidth = 0.8) +
-  geom_point(position = position_dodge(0.4), size = 4.5) +
-  geom_text(aes(y = posicao_letra, label = letra), 
-            vjust = 0, size = 5.5, fontface = "bold", 
-            position = position_dodge(0.4), show.legend = FALSE) + 
-  scale_color_manual(values = c("N1" = "#f3716d", "N4/N5" = "#1ebbc7"), name = "Platô") +
-  scale_y_continuous(limits = c(0, 30), breaks = seq(0, 20, by = 10)) +
-  labs(x = "Geofacie",y = "Predicted abund") +
-  theme_classic(base_size = 14) +
-  theme(axis.text.x = element_text(color = "black", size = 12),
-     axis.text.y = element_text(color = "black", size = 12),
-     axis.line = element_line(color = "black", linewidth = 0.6),
-     legend.position = "bottom")
-ggsave("PlotAbun.png", width = 8, height = 7, dpi = 300)
-
-#Gráfico de Probabilidade de ocorrência
-# Campo graminoso é um filtro para a ocorrência de Ipomoea
-# Gerando as médias para a inflação de zeros
-
-
-# 1. Extrai as médias da inflação de zeros (component = "zi") na escala de probabilidade
-emm_zi <- emmeans(modAbundZInoN23, specs = ~ Geofacie, component = "zi", type = "response")
-
-# 2. Gera as letras do teste de Tukey para a ausência
-cld_zi <- cld(emm_zi, adjust = "tukey", Letters = letters) %>% 
-  as.data.frame() %>% 
-  mutate(letra = trimws(.group))
-
-# 3. Transforma chance de ausência em PROBABILIDADE DE OCORRÊNCIA (presença)
-# Correção: Usando os nomes diretos das colunas sem a função any_of()
-tabela_ocorrencia <- cld_zi %>% 
-  mutate(
-    Prob_Ocorrencia = 1 - response,
-    LCL_limpo = 1 - asymp.UCL,  # Limite inferior da presença usa o teto da ausência
-    UCL_limpo = 1 - asymp.LCL   # Limite superior da presença usa o piso da ausência
-  ) %>% 
-  dplyr::select(Geofacie, Prob_Ocorrencia, LCL_limpo, UCL_limpo, letra)
-
-# 4. Printa o resultado final estruturado na tela
-print(tabela_ocorrencia)
-
-# 5. Printa os p-valores ajustados de Tukey para cada par
-summary(pairs(emm_zi), adjust = "tukey")
-cld_zi_preparado <- cld_zi %>% 
-  mutate(
-    Prob_Ocorrencia = 1 - response,
-    IC_inferior     = 1 - asymp.UCL,  # Limite inferior da presença
-    IC_superior     = 1 - asymp.LCL   # Limite superior da presença
-  ) %>% 
-  mutate(
-    # Corrige matematicamente caso os erros passem dos limites lógicos de 0% e 100%
-    IC_inferior = ifelse(IC_inferior < 0, 0, IC_inferior),
-    IC_superior = ifelse(IC_superior > 1, 1, IC_superior),
-    .group = trimws(.group) # Garante que as letras não tenham espaços
-  )
-
-# Gráfico de Probabilidade de Ocorrência
-ggplot(cld_zi_preparado, aes(x = Geofacie, y = Prob_Ocorrencia, fill = Geofacie)) +
-  geom_bar(stat = "identity", color = "black", alpha = 0.8, width = 0.6) +
-  geom_errorbar(aes(ymin = IC_inferior, ymax = IC_superior), width = 0.2) +
-  geom_text(aes(y = IC_superior, label = .group), vjust = -0.5, size = 5) + # Letras no topo
-  scale_y_continuous(labels = scales::percent, limits = c(0, 1.05)) + # Transforma o eixo Y em % (0 a 100%)
-  labs(
-    x = "Geofácies",
-    y = "Probabilidade de Ocorrência (%)",
-    title = "Probabilidade de Ocorrência de Ipomoea por Geofácies"
-  ) +
-  theme_minimal(base_size = 14) +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
-
-
-
-# 1. Encontra o valor máximo para definir o último corte
+# Encontra o valor máximo para definir o último corte
 max_val <- max(IpomoeaAbund$N_Ind_Tota, na.rm = TRUE)
 
-# 2. Cria sequências de 10 em 10 a partir do 0 até ultrapassar o máximo
+# Sequências de 10 em 10 a partir do 0 
 cortes_sequencia <- seq(0, ceiling(max_val / 10) * 10, by = 10)
 
-# 3. Une o -1 (para isolar o zero) com a sequência de 10 em 10
+# Une o -1 (para isolar o zero) com a sequência de 10 em 10
 todos_cortes <- c(-1, cortes_sequencia)
 
-# 4. Cria os rótulos de forma automatizada (ex: "0", "1-10", "11-20"...)
+# Rotulagem de forma automatizada (ex: "0", "1-10", "11-20"...)
 rotulos <- c("0", paste0(cortes_sequencia[-length(cortes_sequencia)] + 1, "-", cortes_sequencia[-1]))
 
-# 5. Aplica os cortes na base de dados
-IpomoeaAbund$Faixa_10 <- cut(IpomoeaAbund$N_Ind_Tota, 
-                             breaks = todos_cortes, 
-                             labels = rotulos, 
+IpomoeaAbund$Faixa_10 <- cut(IpomoeaAbund$N_Ind_Tota, breaks = todos_cortes, labels = rotulos, 
                              include.lowest = TRUE)
-
-# 6. Gera o gráfico finalizado com TODOS os números aparecendo
+nrow(IpomoeaAbund)
+# Gerar e salvar o gráfico de distribuição de abundância por parcelas
 ggplot(IpomoeaAbund, aes(x = Faixa_10, fill = Faixa_10 == "0")) +
   geom_bar(width = 1.0, color = "white", show.legend = FALSE) +
   scale_fill_manual(values = c("TRUE" = "#e63946", "FALSE" = "#4a90e2")) +
-  scale_y_continuous(
-    breaks = seq(0, 1000, by = 50), 
-    expand = expansion(mult = c(0, 0.1))
-  ) +
-  labs(x= "Total de indivíduos",y= "Total de parcelas") +
+  scale_y_continuous(breaks = seq(0, 1000, by = 50), expand = expansion(mult = c(0, 0.1))) +
+  labs(x = "Abundance", y = "Number of plots") +
   theme_minimal(base_size = 12) +
   theme(panel.grid.minor = element_blank(),
-    panel.grid.major.x = element_blank(),
-    axis.text.x = element_text(size = 9))+
- stat_count(geom = "text", aes(label = after_stat(count)), 
+        panel.grid.major.x = element_blank(),
+        axis.text.x = element_text(size = 9)) +
+  stat_count(geom = "text", aes(label = after_stat(count)), 
              vjust = -0.5, fontface = "bold", size = 3.5)
 
+ggsave("PlotParc.png", width = 8, height = 7, dpi = 300)
+
+
+# ==============================================================================
+# MÓDULO 1: MODELAGEM LOCAL GERAL (GEOFÁCIES * PLATÔ)
+# ==============================================================================
 
 
 
+# ==============================================================================
+# SCRIPT DE ANÁLISE: MODELAGEM DE ABUNDÂNCIA DE IPOMOEA EM CANGAS DE CARAJÁS
+# ==============================================================================
 
 
 
+# --- 1. CONFIGURAÇÃO E AJUSTE DO MODELO BASE ---
+# Nota: Usamos o modelo aditivo (+) para evitar problemas de convergência 
+# causados pela falta de dados em certas combinações de Geofacie e Platô.
+options(na.action = "na.fail") # Exigido pelo pacote MuMIn para rodar o dredge
+
+modAbundZI <- glmmTMB(N_Ind_Total ~ Geofacie*PLATO2, 
+                      data = IpomoeaAbund,
+                      ziformula = ~ Geofacie, 
+                      family = nbinom2)
+#ATENÇÃO: Mensagen de aviso:
+#In finalizeTMB(TMBStruc, obj, fit, h, data.tmb.old) :
+ # Model convergence problem; non-positive-definite Hessian matrix. See vignette('troubleshooting')
+#Esse aviso é problemático, pois há geofácie sem amostragem, e isso afeta a convergência.
+# Filtra removendo o Campo Brejoso
+# --- 2. SELEÇÃO AUTOMATIZADA DE MODELOS VIA AIC ---
+dredge_resultado <- dredge(modAbundZI, rank = "AIC")
+print(dredge_resultado)
+
+# --- 3. EXTRAÇÃO E CHECAGEM DO MELHOR MODELO (VENCEDOR AIC) ---
+# Usamos colchetes duplos [[1]] para extrair o objeto glmmTMB de dentro da lista
+best_model <- get.models(dredge_resultado, subset = 1)[[1]]
+
+# Exibir o sumário estatístico do modelo vencedor
+summary(best_model)
+
+####################################################################################
+#                          PÓS TESTE
+##################################################################################
+#Comparação por PLATO
+postCondPlato <- emmeans(best_model, specs = pairwise ~Geofacie|PLATO2, component = "cond", type = "response")
+postCondPlato$emmeans
+postCondPlato$contrasts
+
+#Comparação por Geofácie
+postCondGeof<- emmeans(best_model, specs = pairwise ~ PLATO2 | Geofacie, component = "cond", type = "response")
+postCondGeof$emmeans
+postCondGeof$contrasts
 
 
 
+# Gerando as letras para as Geofácies dentro de cada Platô
+CondLetters<- cld(postCondPlato, Letters = letters, adjust = "tukey") %>%
+  as.data.frame() %>%
+  # Remove os valores que o modelo não conseguiu estimar (nonEst) para não quebrar o gráfico
+  filter(!is.na(response))
+
+##################################################################################
+#                      CONDITIONAL PLOT
+##################################################################################
+# Garante que o R trate a Geofacie como um fator e limpa as letrinhas
+CondLetters<- CondLetters %>%
+  mutate(Geofacie = as.factor(Geofacie),
+         .group = trimws(.group))
+CondPlot <- ggplot(CondLetters, aes(x = Geofacie, y = response, color = Geofacie)) + 
+  geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL), width = 0.2, linewidth = 0.8) +
+  geom_point(size = 3.5) +
+  geom_text(aes(y = asymp.UCL * 1.15, label = .group), size = 4.5, fontface = "bold", color = "black") +
+  facet_wrap(~ PLATO2, scales = "free_y") + 
+  scale_color_brewer(palette = "Set1") +
+  labs(x = "Geofácie",y = "Abundância de Indivíduos (Média ± IC 95%)") +
+  theme_classic(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        strip.background = element_rect(fill = "gray95"),
+        strip.text = element_text(face = "bold"),
+        legend.position = "none") # Esconde a legenda pois os nomes já estão no eixo X
+print(CondPlot)
+
+############################################################################################
+#                       ZI PLOT
+############################################################################################
+library(dplyr)
+library(ggplot2)
+#ComparaçãoZi
+postZi <- emmeans(best_model, specs = pairwise ~ Geofacie, component = "zi", type = "response")
+postZi$emmeans
+postZi$contrasts
+# ==============================================================================
+# 1. PROCESSAMENTO E ORDENAÇÃO COMPLETA DOS DADOS (PASSO A PASSO)
+# ==============================================================================
+ZiLetters_Ordenado <- ZiLetters %>%
+  # PASSO 1: Transforma os valores de proporção (0-1) do emmeans para porcentagem (0-100%)
+  mutate(prob_pct = response * 100,
+         lcl_pct = asymp.LCL * 100,
+         ucl_pct = asymp.UCL * 100) %>%
+  # PASSO 2: Limpa os fatores e remove espaços das letrinhas
+  mutate(Geofacie = as.factor(Geofacie),
+         .group = trimws(.group)) %>%
+  # PASSO 3: Agora sim, ordena de forma decrescente (O R vai encontrar o prob_pct criado no Passo 1)
+  arrange(desc(prob_pct)) %>%
+  # PASSO 4: Trava essa ordem decrescente na memória do R
+  mutate(Geofacie = factor(Geofacie, levels = unique(Geofacie)))
+
+# ==============================================================================
+# 2. MONTAGEM E EXIBIÇÃO DO GRÁFICO (DO MAIOR PARA O MENOR ZERO ESTRUTURAL)
+# ==============================================================================
+ZiPlot <- ggplot(ZiLetters_Ordenado, aes(x = Geofacie, y = prob_pct, color = Geofacie)) +
+  
+  # Barras de intervalo de confiança coloridas por Geofácie
+  geom_errorbar(aes(ymin = lcl_pct, ymax = ucl_pct), width = 0.15, linewidth = 1) +
+  
+  # Ponto central colorido por Geofácie
+  geom_point(size = 4.5) +
+  
+  # Aplica a paleta Set1 de cores fixas e contrastantes
+  scale_color_brewer(palette = "Set1") +
+  
+  # Letrinhas do pós-teste automáticas e pretas
+  geom_text(aes(y = ucl_pct + 4, label = .group), size = 5, fontface = "bold", color = "black") +
+  
+  # Limite fixo do eixo Y
+  scale_y_continuous(limits = c(0, 110)) +
+  
+  # Legendas em inglês (Eixos e Títulos)
+  labs(x = "Geo-facies", 
+       y = "Structural Zero Probability (%)",
+       title = "Probability of Habitat Inadequacy by Geo-facies",
+       subtitle = "Different letters indicate significant differences between habitats (Sidak, p < 0.05)") +
+  
+  theme_classic(base_size = 14) +
+  theme(plot.title = element_text(face = "bold"),
+        axis.text.x = element_text(angle = 15, hjust = 1),
+        legend.position = "none")
+
+# Exibe o gráfico finalizado na sua tela
+print(ZiPlot)
+
+# Salva o arquivo em alta resolução na sua pasta do projeto
+ggsave("ZiPlot_Final.tiff", width = 7, height = 6, dpi = 300, device = "tiff")
+
+# ==============================================================================
+## ==============================================================================
+# MÓDULO 2: MODELAGEM DA MATRIZ CIRCUNDANTE (BUFFER VETORIAL DE 5 METROS)
+# ==============================================================================
+
+# --- 0. CARREGAR PACOTES NECESSÁRIOS ---
+library(sf)        # Para manipulação de dados espaciais (Shapefiles e Geometria)
+library(dplyr)     # Para manipulação, filtragem e organização de dados
+library(tidyr)     # Para pivotagem de tabelas (pivot_wider)
+library(glmmTMB)   # Para ajuste de modelos zero-inflados de contagem
+library(MuMIn)     # Para seleção automatizada de modelos via AIC
+library(ggplot2)   # Para visualização gráfica das predições
+
+# --- 1. UNIÃO E PREPARAÇÃO DOS DADOS ESPACIAIS ---
+# Une a planilha de abundância externa ao Shapefile geográfico original das parcelas
+dados_completos <- left_join(SnShape, IpomoeaData, by = "ID_PARCELA")
+
+# Corrige o CRS dos pontos para UTM Zone 22S (Métrico), igualando ao mapa geológico/fisionômico 'geof'
+pontos_utm <- st_transform(dados_completos, st_crs(geof))
+
+# --- 2. ANÁLISE ESPACIAL DE MICRO-ENTORNO (SIG NO R) ---
+# Criando a zona de amortecimento (buffer) com base no raio de 5 metros
+buffers_parcelas <- st_buffer(pontos_utm, dist = 5)
+
+# Interseção Geométrica Vetorial pura (Corta o mapa 'geof' nas bordas circulares de cada buffer de 5m)
+intersecao <- st_intersection(buffers_parcelas, geof)
+
+# Calcula a área exata em metros quadrados de cada fragmento recortado
+intersecao$area_pedaco <- as.numeric(st_area(intersecao))
+
+# --- 3. CÁLCULO DAS PROPORÇÕES DA MATRIZ EM 5M (AGRUPADO) ---
+# Padroniza e agrupa as fisionomias rupestres e mata baixa vindas do mapa 'geof' antes de calcular as áreas
+df_proporcoes <- intersecao %>%
+  st_drop_geometry() %>% # Remove dados espaciais brutos para acelerar a manipulação
+  mutate(GeoF_2024 = recode(GeoF_2024,
+                            "Campo Graminoso"="Grassland",
+                            "Lajedo"= "Rocky outcrop",
+                            "Mata baixa" = "Low forest",
+                            "Vegetação Rupestre Arbustiva" = "Rupestrian vegetation",
+                            "Vegetação Rupestre Aberta"    = "Rupestrian vegetation",
+                            "vegetação rupestre aberta"    = "Rupestrian vegetation")) %>%
+  group_by(ID_PARCELA, GeoF_2024) %>% 
+  summarise(Area_Total_Classe = sum(area_pedaco), .groups = "drop") %>%
+  group_by(ID_PARCELA) %>%
+  mutate(Proporcao_Entorno = Area_Total_Classe / sum(Area_Total_Classe)) %>%
+  ungroup()
+
+# Pivotagem para o formato "Largo" (Cada geofácie do entorno vira uma variável contínua de 0 a 1)
+df_matriz_larga <- df_proporcoes %>%
+  dplyr::select(ID_PARCELA, GeoF_2024, Proporcao_Entorno) %>%
+  pivot_wider(names_from = GeoF_2024, values_from = Proporcao_Entorno, values_fill = 0)
+
+# --- 4. ESTRUTURAÇÃO DA TABELA DE MODELAGEM FINAL ---
+# Cruza as proporções calculadas no entorno de 5m com os dados populacionais locais
+df_analise_final <- pontos_utm %>%
+  st_drop_geometry() %>% # Remove a geometria para blindar e não travar o glmmTMB
+  dplyr::select(ID_PARCELA, PLATO.x, Geofacie.x, N_Ind_Tota) %>% 
+  dplyr::rename(PLATO = PLATO.x, Geofacie_Local = Geofacie.x, Abundancia = N_Ind_Tota) %>%
+  left_join(df_matriz_larga, by = "ID_PARCELA")
+
+# Preenche com zero caso alguma parcela não tenha interceptado nenhuma geofácie mapeada no raio de 5m
+df_analise_final[is.na(df_analise_final)] <- 0
+
+# --- 5. LIMPEZA DE ESCOPO E FILTRAGEM BIÓTICA ---
+# 1. Filtramos as linhas aceitando também a string em minúsculo que foi identificada
+df_analise_restrito <- df_analise_final %>%
+  dplyr::filter(Geofacie_Local %in% c("Lajedo", 
+                                      "Campo Brejoso", 
+                                      "Vegetação Rupestre Arbustiva", 
+                                      "Vegetação Rupestre Aberta", 
+                                      "vegetação rupestre aberta", 
+                                      "Mata baixa", 
+                                      "Campo Graminoso"))
+
+# 2. Consolidação Metodológica: Corrigindo as maiúsculas/minúsculas e agrupando as rupestres locais
+df_analise_restrito <- df_analise_restrito %>%
+  mutate(Geofacie_Local = recode(Geofacie_Local, 
+                                 "Mata baixa"="Mata Baixa",
+                                 "Vegetação Rupestre Arbustiva" = "Vegetação Rupestre",
+                                 "Vegetação Rupestre Aberta"    = "Vegetação Rupestre",
+                                 "vegetação rupestre aberta"    = "Vegetação Rupestre"))
+
+# Verificação diagnóstica
+cat("\n--- Distribuição Corrigida das Parcelas ---\n")
+print(table(df_analise_restrito$Geofacie_Local))
+
+# --- 6. MODELAGEM ESTATÍSTICA DO MICRO-ENTORNO (glmmTMB) ---
+options(na.action = "na.fail")
+
+# Nota: Omitimos `Mata Baixa` da fórmula abaixo para servir de base/referência espacial,
+# evitando multicolinearidade exata (soma das proporções do círculo sempre igual a 1).
+modMatrizZI <- glmmTMB(
+  Abundancia ~ Lajedo + `Campo Graminoso` + `Vegetação Rupestre` + PLATO, 
+  ziformula = ~ Lajedo + `Campo Graminoso` + `Vegetação Rupestre` + PLATO, 
+  data = df_analise_restrito, 
+  family = nbinom2
+)
+
+# --- 7. SELEÇÃO AUTOMATIZADA VIA CRITÉRIO DE INFORMAÇÃO (AIC) ---
+dredge_matriz <- dredge(modMatrizZI, rank = "AIC")
+cat("\n--- Ranking de Modelos Candidatos (AIC) ---\n")
+print(dredge_matriz)
+
+# Extração cirúrgica do melhor modelo da matriz de 5m usando colchetes duplos [[]]
+best_model_matriz <- get.models(dredge_matriz, subset = 1)[[1]]
+
+# --- 8. EXIBIÇÃO DO VEREDITO ESTATÍSTICO DO MELHOR MODELO ---
+cat("\n--- Sumário Estatístico do Melhor Modelo Selecionado (Entorno 5m) ---\n")
+summary(best_model_matriz)
 
 
+# ==============================================================================
+# MÓDULO 2.1: GRÁFICO MULTIVARIÁVEL COM CORES E SÍMBOLOS DISTINTOS (5M)
+# ==============================================================================
 
+# 1. CRIAR GRADE DE PREDIÇÃO PARA LAJEDO
+grade_lajedo <- expand.grid(
+  Lajedo = seq(0, 1, length.out = 100),
+  `Campo Graminoso` = 0, 
+  `Vegetação Rupestre` = 0,
+  PLATO = unique(df_analise_restrito$PLATO)
+)
+pred_lajedo <- predict(best_model_matriz, newdata = grade_lajedo, type = "link", se.fit = TRUE)
+grade_lajedo$Abundancia_Prevista <- exp(pred_lajedo$fit)
+grade_lajedo$IC_Inferior        <- exp(pred_lajedo$fit - 1.96 * pred_lajedo$se.fit)
+grade_lajedo$IC_Superior        <- exp(pred_lajedo$fit + 1.96 * pred_lajedo$se.fit)
+grade_lajedo$Tipo_Matriz         <- "Lajedo (Rocky Outcrop)"
+grade_lajedo$Proporcao           <- grade_lajedo$Lajedo
 
+# 2. CRIAR GRADE DE PREDIÇÃO PARA CAMPO GRAMINOSO
+grade_campo <- expand.grid(
+  Lajedo = 0, 
+  `Campo Graminoso` = seq(0, 1, length.out = 100),
+  `Vegetação Rupestre` = 0,
+  PLATO = unique(df_analise_restrito$PLATO)
+)
+pred_campo <- predict(best_model_matriz, newdata = grade_campo, type = "link", se.fit = TRUE)
+grade_campo$Abundancia_Prevista <- exp(pred_campo$fit)
+grade_campo$IC_Inferior        <- exp(pred_campo$fit - 1.96 * pred_campo$se.fit)
+grade_campo$IC_Superior        <- exp(pred_campo$fit + 1.96 * pred_campo$se.fit)
+grade_campo$Tipo_Matriz         <- "Campo Graminoso (Grassland)"
+grade_campo$Proporcao           <- grade_campo$`Campo Graminoso`
 
+# 3. CRIAR GRADE DE PREDIÇÃO PARA VEGETAÇÃO RUPESTRE
+grade_rupestre <- expand.grid(
+  Lajedo = 0,
+  `Campo Graminoso` = 0,
+  `Vegetação Rupestre` = seq(0, 1, length.out = 100),
+  PLATO = unique(df_analise_restrito$PLATO)
+)
+pred_rupestre <- predict(best_model_matriz, newdata = grade_rupestre, type = "link", se.fit = TRUE)
+grade_rupestre$Abundancia_Prevista <- exp(pred_rupestre$fit)
+grade_rupestre$IC_Inferior        <- exp(pred_rupestre$fit - 1.96 * pred_rupestre$se.fit)
+grade_rupestre$IC_Superior        <- exp(pred_rupestre$fit + 1.96 * pred_rupestre$se.fit)
+grade_rupestre$Tipo_Matriz         <- "Vegetação Rupestre"
+grade_rupestre$Proporcao           <- grade_rupestre$`Vegetação Rupestre`
 
+# 4. UNIFICAR AS PREDIÇÕES EM UM ÚNICO BANCO LONGO
+grade_total <- rbind(
+  grade_lajedo   %>% dplyr::select(PLATO, Tipo_Matriz, Proporcao, Abundancia_Prevista, IC_Inferior, IC_Superior),
+  grade_campo    %>% dplyr::select(PLATO, Tipo_Matriz, Proporcao, Abundancia_Prevista, IC_Inferior, IC_Superior),
+  grade_rupestre %>% dplyr::select(PLATO, Tipo_Matriz, Proporcao, Abundancia_Prevista, IC_Inferior, IC_Superior)
+)
 
+# 5. ORGANIZAR OS DADOS REAIS DAS PARCELAS NO FORMATO LONGO
+df_pontos_longo <- df_analise_restrito %>%
+  dplyr::select(ID_PARCELA, PLATO, Abundancia, Lajedo, `Campo Graminoso`, `Vegetação Rupestre`) %>%
+  pivot_longer(cols = c(Lajedo, `Campo Graminoso`, `Vegetação Rupestre`),
+               names_to = "Tipo_Matriz", values_to = "Proporcao") %>%
+  mutate(Tipo_Matriz = recode(Tipo_Matriz, 
+                              "Lajedo" = "Lajedo (Rocky Outcrop)",
+                              "Campo Graminoso" = "Campo Graminoso (Grassland)"))
 
+# 6. GERAR E EXIBIR O GRÁFICO FINAL VIA GGPLOT2
+grafico_final <- ggplot() +
+  geom_ribbon(data = grade_total, aes(x = Proporcao, ymin = IC_Inferior, ymax = IC_Superior, fill = Tipo_Matriz), alpha = 0.15) +
+  geom_line(data = grade_total, aes(x = Proporcao, y = Abundancia_Prevista, color = Tipo_Matriz), size = 1.2) +
+  geom_point(data = df_pontos_longo, aes(x = Proporcao, y = Abundancia, color = Tipo_Matriz, shape = PLATO), alpha = 0.5, size = 2) +
+  facet_wrap(~PLATO) +
+  labs(x = "Proporção da Geofácie no Entorno (5m)", 
+       y = "Abundância de Indivíduos", 
+       title = "Efeito da Matriz Circundante na Abundância por Platô",
+       color = "Tipo de Geofácie", fill = "Tipo de Geofácie", shape = "Platô") +
+  theme_classic() +
+  theme(legend.position = "bottom")
 
-
-
-
+print(grafico_final)
