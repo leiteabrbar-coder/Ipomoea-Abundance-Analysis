@@ -116,12 +116,7 @@ ggplot(IpomoeaAbund, aes(x = Faixa_10, fill = Faixa_10 == "0")) +
 
 ggsave("PlotParc.png", width = 8, height = 7, dpi = 300)
 
-
-
-
-
-
- ##########################################################################################################
+##########################################################################################################
 #                                MODELAGEM ABUNDÂNCIA
 ###############################################################################################################
 
@@ -232,181 +227,252 @@ ggplot(ZiLetters_Ordenado, aes(x = Geofacie, y = prob_pct, color = Geofacie)) +
         legend.position = "none")
 ggsave("ZiPlot.tiff", width = 7, height = 6, dpi = 300, device = "tiff")
 
-##################################################################################
-#                            MODELAGEM MATRIZ CIRCUNDANTE
-##############################################################################################
 
-# --- 1. UNIÃO E PREPARAÇÃO DOS DADOS ESPACIAIS ---
-# Une a planilha de abundância externa ao Shapefile geográfico original das parcelas
-dados_completos <- left_join(SnShape, IpomoeaData, by = "ID_PARCELA")
+##############################################################################
+#                  MODELAGEM DA MATRIZ CIRCUNDANTE (5 METROS)
+###############################################################################
 
-# Corrige o CRS dos pontos para UTM Zone 22S (Métrico), igualando ao mapa geológico/fisionômico 'geof'
-pontos_utm <- st_transform(dados_completos, st_crs(geof))
+SnShape <- st_read("Data/PRJ112_DadosIpomoea_Densidades_v00.shp")
+geof    <- st_read("Data/Serra_Norte_2024_wLoc.shp")
+IpomoeaData <- openxlsx::read.xlsx("PRJ152_DadosIpomoea_Densidades_v05.xlsx") %>%
+  mutate(across(where(is.character), trimws))
+SnShape_Unico <- SnShape %>% 
+  mutate(ID_PARCELA = trimws(as.character(ID_PARCELA))) %>%
+  distinct(ID_PARCELA, .keep_all = TRUE)
+# Transforma os pontos únicos para o CRS métrico do mapa de fisionomias
+pontos_utm <- st_transform(SnShape_Unico, st_crs(geof))
 
-# --- 2. ANÁLISE ESPACIAL DE MICRO-ENTORNO (SIG NO R) ---
-# Criando a zona de amortecimento (buffer) com base no raio de 5 metros
+# Criando a zona de amortecimento (buffer) de 5 metros
 buffers_parcelas <- st_buffer(pontos_utm, dist = 5)
 
-# Interseção Geométrica Vetorial pura (Corta o mapa 'geof' nas bordas circulares de cada buffer de 5m)
+# Interseção Vetorial (Recorta o mapa fisionômico no entorno de 5m)
 intersecao <- st_intersection(buffers_parcelas, geof)
-
-# Calcula a área exata em metros quadrados de cada fragmento recortado
 intersecao$area_pedaco <- as.numeric(st_area(intersecao))
-
-# --- 3. CÁLCULO DAS PROPORÇÕES DA MATRIZ EM 5M (AGRUPADO) ---
-# Padroniza e agrupa as fisionomias rupestres e mata baixa vindas do mapa 'geof' antes de calcular as áreas
 df_proporcoes <- intersecao %>%
-  st_drop_geometry() %>% # Remove dados espaciais brutos para acelerar a manipulação
-  mutate(GeoF_2024 = recode(GeoF_2024,
-                            "Campo Graminoso"="Grassland",
-                            "Lajedo"= "Rocky outcrop",
-                            "Mata baixa" = "Low forest",
-                            "Vegetação Rupestre Arbustiva" = "Rupestrian vegetation",
-                            "Vegetação Rupestre Aberta"    = "Rupestrian vegetation",
-                            "vegetação rupestre aberta"    = "Rupestrian vegetation")) %>%
+  st_drop_geometry() %>% 
+  mutate(GeoF_2024 = dplyr::recode(GeoF_2024,
+                                   "Campo Graminoso"              = "Grassland",
+                                   "Lajedo"                       = "Rocky_outcrop",
+                                   "Mata baixa"                   = "Low_forest",
+                                   "Mata Baixa"                   = "Low_forest",
+                                   "Vegetação Rupestre Arbustiva" = "Rupestrian_vegetation",
+                                   "Vegetação Rupestre Aberta"    = "Rupestrian_vegetation",
+                                   "vegetação rupestre aberta"    = "Rupestrian_vegetation")) %>%
+  # Exclui o Campo Brejoso da paisagem circundante
+  filter(GeoF_2024 != "Campo Brejoso") %>%
   group_by(ID_PARCELA, GeoF_2024) %>% 
   summarise(Area_Total_Classe = sum(area_pedaco), .groups = "drop") %>%
   group_by(ID_PARCELA) %>%
   mutate(Proporcao_Entorno = Area_Total_Classe / sum(Area_Total_Classe)) %>%
   ungroup()
 
-# Pivotagem para o formato "Largo" (Cada geofácie do entorno vira uma variável contínua de 0 a 1)
+# Pivotagem para formato Largo
 df_matriz_larga <- df_proporcoes %>%
   dplyr::select(ID_PARCELA, GeoF_2024, Proporcao_Entorno) %>%
   pivot_wider(names_from = GeoF_2024, values_from = Proporcao_Entorno, values_fill = 0)
+ 
+df_analise_restrito <- IpomoeaData %>%
+  # 4.1 Padroniza as grafias locais do Excel usando a coluna Geofacie2
+  mutate(Geofacie_Tratada = ifelse(Geofacie2 %in% c("vegetação rupestre aberta", 
+                                                    "Vegetação Rupestre Aberta", 
+                                                    "Vegetação Rupestre Arbustiva"), 
+                                   "Vegetação Rupestre", Geofacie2)) %>%
+  
+  # 4.2 Remove o Campo Brejoso local baseado nos dados reais do Excel
+  filter(Geofacie_Tratada != "Campo Brejoso") %>%
+  
+  # 4.3 Traduz os nomes locais para o inglês para casar com as matrizes
+  mutate(Geofacie_Local = case_match(Geofacie_Tratada,
+                                     "Campo Graminoso"    ~ "Grassland",
+                                     "Lajedo"             ~ "Rocky outcrop",
+                                     "Mata Baixa"         ~ "Low forest",
+                                     "Mata baixa"         ~ "Low forest",
+                                     "Vegetação Rupestre" ~ "Rupestrian vegetation",
+                                     .default = Geofacie_Tratada
+  )) %>%
+  
+  # 4.4 Junta as proporções de paisagem calculadas no entorno de 5m
+  left_join(df_matriz_larga, by = "ID_PARCELA") %>%
+  
+  # 4.5 Seleciona e renomeia as colunas finais exatas do Excel para o modelo
+  dplyr::select(ID_PARCELA, PLATO2, Geofacie_Local, N_Ind_Total, 
+                Grassland, Rocky_outcrop, Rupestrian_vegetation) %>%
+  dplyr::rename(PLATO = PLATO2,N_Ind_Total=N_Ind_Total)
 
-# --- 4. ESTRUTURAÇÃO DA TABELA DE MODELAGEM FINAL ---
-# Cruza as proporções calculadas no entorno de 5m com os dados populacionais locais
-df_analise_final <- pontos_utm %>%
-  st_drop_geometry() %>% # Remove a geometria para blindar e não travar o glmmTMB
-  dplyr::select(ID_PARCELA, PLATO.x, Geofacie.x, N_Ind_Tota) %>% 
-  dplyr::rename(PLATO = PLATO.x, Geofacie_Local = Geofacie.x, Abundancia = N_Ind_Tota) %>%
-  left_join(df_matriz_larga, by = "ID_PARCELA")
-
-# Preenche com zero caso alguma parcela não tenha interceptado nenhuma geofácie mapeada no raio de 5m
-df_analise_final[is.na(df_analise_final)] <- 0
-
-# --- 5. LIMPEZA DE ESCOPO E FILTRAGEM BIÓTICA ---
-# 1. Filtramos as linhas aceitando também a string em minúsculo que foi identificada
-df_analise_restrito <- df_analise_final %>%
-  dplyr::filter(Geofacie_Local %in% c("Lajedo", 
-                                      "Campo Brejoso", 
-                                      "Vegetação Rupestre Arbustiva", 
-                                      "Vegetação Rupestre Aberta", 
-                                      "vegetação rupestre aberta", 
-                                      "Mata baixa", 
-                                      "Campo Graminoso"))
-
-# 2. Consolidação Metodológica: Corrigindo as maiúsculas/minúsculas e agrupando as rupestres locais
+# Preenche com zero fisionomias contínuas vazias e converte em fatores
+df_analise_restrito[is.na(df_analise_restrito)] <- 0
 df_analise_restrito <- df_analise_restrito %>%
-  mutate(Geofacie_Local = recode(Geofacie_Local, 
-                                 "Mata baixa"="Mata Baixa",
-                                 "Vegetação Rupestre Arbustiva" = "Vegetação Rupestre",
-                                 "Vegetação Rupestre Aberta"    = "Vegetação Rupestre",
-                                 "vegetação rupestre aberta"    = "Vegetação Rupestre"))
+  mutate(Geofacie_Local = as.factor(Geofacie_Local),
+         PLATO = as.factor(PLATO))
 
-# Verificação diagnóstica
-cat("\n--- Distribuição Corrigida das Parcelas ---\n")
+# --- Diagnóstico visual do esforço amostral (Baseado puramente no Excel) ---
+cat("\n--- Distribuição das Parcelas Locais (Referência Excel) ---\n")
 print(table(df_analise_restrito$Geofacie_Local))
 
-# --- 6. MODELAGEM ESTATÍSTICA DO MICRO-ENTORNO (glmmTMB) ---
-options(na.action = "na.fail")
+# 1. Filtra, consolida e transforma a proporção em porcentagem real
+tabela_porcentagem <- df_proporcoes %>%
+  left_join(df_analise_restrito %>% dplyr::select(ID_PARCELA, PLATO), by = "ID_PARCELA") %>%
+  filter(!is.na(PLATO)) %>%
+  
+  mutate(GeoF_2024 = case_match(GeoF_2024,
+                                "Rocky_outcrop"         ~ "Rocky outcrop",
+                                "Rupestrian_vegetation" ~ "Rupestrian vegetation",
+                                "Low_forest"            ~ "Low forest",
+                                "Grassland"             ~ "Grassland",
+                                .default = GeoF_2024
+  )) %>%
+  
+  filter(GeoF_2024 %in% c("Grassland", "Low forest", "Rocky outcrop", "Rupestrian vegetation")) %>%
+  
+  group_by(PLATO, GeoF_2024) %>%
+  summarise(
+    Total_Area_m2 = sum(Area_Total_Classe, na.rm = TRUE),
+    .groups = "drop_last"
+  ) %>%
+  
+  # MULTIPLICA POR 100 PARA GERAR A PORCENTAGEM
+  mutate(Percentage_Val = (Total_Area_m2 / sum(Total_Area_m2)) * 100) %>%
+  ungroup() %>%
+  
+  # Formata os números e adiciona o símbolo de % colado ao valor
+  mutate(
+    Total_Area_m2 = round(Total_Area_m2, 2),
+    `Percentage (%)` = paste0(round(Percentage_Val, 1), "%")
+  ) %>%
+  
+  # Seleciona e renomeia para o layout oficial em inglês do artigo
+  dplyr::select(PLATO, GeoF_2024, Total_Area_m2, `Percentage (%)`) %>%
+  dplyr::rename(
+    Plateau = PLATO,
+    `Geo-facies (Matrix)` = GeoF_2024,
+    `Total Area (m²)` = Total_Area_m2
+  ) %>%
+  arrange(Plateau, `Geo-facies (Matrix)`)
 
-# Nota: Omitimos `Mata Baixa` da fórmula abaixo para servir de base/referência espacial,
-# evitando multicolinearidade exata (soma das proporções do círculo sempre igual a 1).
-modMatrizZI <- glmmTMB(
-  Abundancia ~ Lajedo + `Campo Graminoso` + `Vegetação Rupestre` + PLATO, 
-  ziformula = ~ Lajedo + `Campo Graminoso` + `Vegetação Rupestre` + PLATO, 
-  data = df_analise_restrito, 
-  family = nbinom2
+# 2. Exibe a nova tabela com porcentagem no console
+print(as.data.frame(tabela_porcentagem))
+
+#Parcelas na Mata Baixa
+LowForest<- glmmTMB(N_Ind_Total~ Rocky_outcrop + Grassland + Rupestrian_vegetation, 
+                    ziformula = ~ Rocky_outcrop + Grassland + Rupestrian_vegetation, 
+                    data = df_analise_restrito,family = nbinom2)
+#“Essa fisionomia altera a abundância de forma estatisticamente relevante?”
+cat("\n--- PARCELAS LOW FOREST ---\n")
+car::Anova(LowForest, type = "III")
+
+df_analise_restrito <- df_analise_restrito %>%
+  mutate(Low_forest = 1 - (Rocky_outcrop + Grassland + Rupestrian_vegetation))
+
+#Parcelas em campo graminoso
+Grassland<- glmmTMB(N_Ind_Total~ Rocky_outcrop + Rupestrian_vegetation + Low_forest, 
+                    ziformula = ~ Rocky_outcrop + Rupestrian_vegetation + Low_forest, 
+                    data = df_analise_restrito, family = nbinom2)
+cat("\n--- PARCELAS GRASSLAND ---\n")
+car::Anova(Grassland, type = "III")
+
+# Parcelas no Lajedo
+RockyOut<- glmmTMB(N_Ind_Total ~ Grassland + Rupestrian_vegetation + Low_forest, 
+                   ziformula = ~ Grassland + Rupestrian_vegetation + Low_forest, 
+                   data = df_analise_restrito, family = nbinom2)
+cat("\n--- PARCELAS ROCKY OUTCROP ---\n")
+car::Anova(RockyOut, type = "III")
+#Fazer gráfico
+
+# Parcelas na Vegetação rupestre
+Rupestrian<- glmmTMB(N_Ind_Total ~ Rocky_outcrop + Grassland + Low_forest, 
+                             ziformula = ~ Rocky_outcrop + Grassland + Low_forest, 
+                             data = df_analise_restrito, family = nbinom2)
+cat("\n--- PARCELAS RUPESTRIAN VEGETATION ---\n")
+car::Anova(Rupestrian, type = "III")
+#Fazer gráfico
+
+################################################################################
+#                   PLOTAGEM CORRIGIDA (SEM ERROS DE STRING)
+################################################################################
+library(ggplot2)
+library(dplyr)
+
+# 1. PREDIÇÃO 1 e 2: Efeito das Matrizes Rochosas (Modelo LowForest)
+grade_rochas <- expand.grid(
+  Proporcao = seq(0, 1, length.out = 100),
+  Fisionomia = c("Rocky outcrop matrix effect on Low forest plot", 
+                 "Rupestrian vegetation matrix effect on Low forest plot")
 )
 
-# --- 7. SELEÇÃO AUTOMATIZADA VIA CRITÉRIO DE INFORMAÇÃO (AIC) ---
-dredge_matriz <- dredge(modMatrizZI, rank = "AIC")
-cat("\n--- Ranking de Modelos Candidatos (AIC) ---\n")
-print(dredge_matriz)
+# CORRIGIDO: Adicionada a palavra 'matrix' no segundo ifelse para match perfeito
+grade_rochas_mod <- grade_rochas %>%
+  mutate(
+    Rocky_outcrop = ifelse(Fisionomia == "Rocky outcrop matrix effect on Low forest plot", Proporcao, 0),
+    Rupestrian_vegetation = ifelse(Fisionomia == "Rupestrian vegetation matrix effect on Low forest plot", Proporcao, 0),
+    Grassland = 0
+  )
 
-# Extração cirúrgica do melhor modelo da matriz de 5m usando colchetes duplos [[]]
-best_model_matriz <- get.models(dredge_matriz, subset = 1)[[1]]
-
-# --- 8. EXIBIÇÃO DO VEREDITO ESTATÍSTICO DO MELHOR MODELO ---
-cat("\n--- Sumário Estatístico do Melhor Modelo Selecionado (Entorno 5m) ---\n")
-summary(best_model_matriz)
-
+pred_rochas <- predict(LowForest, newdata = grade_rochas_mod, type = "link", se.fit = TRUE)
+grade_rochas$Fit <- exp(pred_rochas$fit)
+grade_rochas$LCL <- exp(pred_rochas$fit - 1.96 * pred_rochas$se.fit)
+grade_rochas$UCL <- exp(pred_rochas$fit + 1.96 * pred_rochas$se.fit)
 
 # ==============================================================================
-# MÓDULO 2.1: GRÁFICO MULTIVARIÁVEL COM CORES E SÍMBOLOS DISTINTOS (5M)
+# 2. PREDIÇÃO 3: Efeito do ganho de Floresta no Lajedo (Modelo RockyOut)
 # ==============================================================================
-
-# 1. CRIAR GRADE DE PREDIÇÃO PARA LAJEDO
-grade_lajedo <- expand.grid(
-  Lajedo = seq(0, 1, length.out = 100),
-  `Campo Graminoso` = 0, 
-  `Vegetação Rupestre` = 0,
-  PLATO = unique(df_analise_restrito$PLATO)
-)
-pred_lajedo <- predict(best_model_matriz, newdata = grade_lajedo, type = "link", se.fit = TRUE)
-grade_lajedo$Abundancia_Prevista <- exp(pred_lajedo$fit)
-grade_lajedo$IC_Inferior        <- exp(pred_lajedo$fit - 1.96 * pred_lajedo$se.fit)
-grade_lajedo$IC_Superior        <- exp(pred_lajedo$fit + 1.96 * pred_lajedo$se.fit)
-grade_lajedo$Tipo_Matriz         <- "Lajedo (Rocky Outcrop)"
-grade_lajedo$Proporcao           <- grade_lajedo$Lajedo
-
-# 2. CRIAR GRADE DE PREDIÇÃO PARA CAMPO GRAMINOSO
-grade_campo <- expand.grid(
-  Lajedo = 0, 
-  `Campo Graminoso` = seq(0, 1, length.out = 100),
-  `Vegetação Rupestre` = 0,
-  PLATO = unique(df_analise_restrito$PLATO)
-)
-pred_campo <- predict(best_model_matriz, newdata = grade_campo, type = "link", se.fit = TRUE)
-grade_campo$Abundancia_Prevista <- exp(pred_campo$fit)
-grade_campo$IC_Inferior        <- exp(pred_campo$fit - 1.96 * pred_campo$se.fit)
-grade_campo$IC_Superior        <- exp(pred_campo$fit + 1.96 * pred_campo$se.fit)
-grade_campo$Tipo_Matriz         <- "Campo Graminoso (Grassland)"
-grade_campo$Proporcao           <- grade_campo$`Campo Graminoso`
-
-# 3. CRIAR GRADE DE PREDIÇÃO PARA VEGETAÇÃO RUPESTRE
-grade_rupestre <- expand.grid(
-  Lajedo = 0,
-  `Campo Graminoso` = 0,
-  `Vegetação Rupestre` = seq(0, 1, length.out = 100),
-  PLATO = unique(df_analise_restrito$PLATO)
-)
-pred_rupestre <- predict(best_model_matriz, newdata = grade_rupestre, type = "link", se.fit = TRUE)
-grade_rupestre$Abundancia_Prevista <- exp(pred_rupestre$fit)
-grade_rupestre$IC_Inferior        <- exp(pred_rupestre$fit - 1.96 * pred_rupestre$se.fit)
-grade_rupestre$IC_Superior        <- exp(pred_rupestre$fit + 1.96 * pred_rupestre$se.fit)
-grade_rupestre$Tipo_Matriz         <- "Vegetação Rupestre"
-grade_rupestre$Proporcao           <- grade_rupestre$`Vegetação Rupestre`
-
-# 4. UNIFICAR AS PREDIÇÕES EM UM ÚNICO BANCO LONGO
-grade_total <- rbind(
-  grade_lajedo   %>% dplyr::select(PLATO, Tipo_Matriz, Proporcao, Abundancia_Prevista, IC_Inferior, IC_Superior),
-  grade_campo    %>% dplyr::select(PLATO, Tipo_Matriz, Proporcao, Abundancia_Prevista, IC_Inferior, IC_Superior),
-  grade_rupestre %>% dplyr::select(PLATO, Tipo_Matriz, Proporcao, Abundancia_Prevista, IC_Inferior, IC_Superior)
+grade_f_laj <- expand.grid(
+  Proporcao = seq(0, 1, length.out = 100),
+  Fisionomia = "Low forest matrix effect on Rocky outcrop plot"
 )
 
-# 5. ORGANIZAR OS DADOS REAIS DAS PARCELAS NO FORMATO LONGO
-df_pontos_longo <- df_analise_restrito %>%
-  dplyr::select(ID_PARCELA, PLATO, Abundancia, Lajedo, `Campo Graminoso`, `Vegetação Rupestre`) %>%
-  pivot_longer(cols = c(Lajedo, `Campo Graminoso`, `Vegetação Rupestre`),
-               names_to = "Tipo_Matriz", values_to = "Proporcao") %>%
-  mutate(Tipo_Matriz = recode(Tipo_Matriz, 
-                              "Lajedo" = "Lajedo (Rocky Outcrop)",
-                              "Campo Graminoso" = "Campo Graminoso (Grassland)"))
+grade_f_laj_mod <- grade_f_laj %>%
+  mutate(Low_forest = Proporcao, Grassland = 0, Rupestrian_vegetation = 0)
 
-# 6. GERAR E EXIBIR O GRÁFICO FINAL VIA GGPLOT2
-grafico_final <- ggplot() +
-  geom_ribbon(data = grade_total, aes(x = Proporcao, ymin = IC_Inferior, ymax = IC_Superior, fill = Tipo_Matriz), alpha = 0.15) +
-  geom_line(data = grade_total, aes(x = Proporcao, y = Abundancia_Prevista, color = Tipo_Matriz), size = 1.2) +
-  geom_point(data = df_pontos_longo, aes(x = Proporcao, y = Abundancia, color = Tipo_Matriz, shape = PLATO), alpha = 0.5, size = 2) +
-  facet_wrap(~PLATO) +
-  labs(x = "Proporção da Geofácie no Entorno (5m)", 
-       y = "Abundância de Indivíduos", 
-       title = "Efeito da Matriz Circundante na Abundância por Platô",
-       color = "Tipo de Geofácie", fill = "Tipo de Geofácie", shape = "Platô") +
-  theme_classic() +
-  theme(legend.position = "bottom")
+pred_f_laj <- predict(RockyOut, newdata = grade_f_laj_mod, type = "link", se.fit = TRUE)
+grade_f_laj$Fit <- exp(pred_f_laj$fit)
+grade_f_laj$LCL <- exp(pred_f_laj$fit - 1.96 * pred_f_laj$se.fit)
+grade_f_laj$UCL <- exp(pred_f_laj$fit + 1.96 * pred_f_laj$se.fit)
 
-print(grafico_final)
+# ==============================================================================
+# 3. PREDIÇÃO 4: Efeito do ganho de Floresta na Veg. Rupestre (Modelo Rupestrian)
+# ==============================================================================
+grade_f_rup <- expand.grid(
+  Proporcao = seq(0, 1, length.out = 100),
+  Fisionomia = "Low forest matrix effect on Rupestrian vegetation plot"
+)
+
+grade_f_rup_mod <- grade_f_rup %>%
+  mutate(Low_forest = Proporcao, Grassland = 0, Rocky_outcrop = 0)
+
+pred_f_rup <- predict(Rupestrian, newdata = grade_f_rup_mod, type = "link", se.fit = TRUE)
+grade_f_rup$Fit <- exp(pred_f_rup$fit)
+grade_f_rup$LCL <- exp(pred_f_rup$fit - 1.96 * pred_f_rup$se.fit)
+grade_f_rup$UCL <- exp(pred_f_rup$fit + 1.96 * pred_f_rup$se.fit)
+
+# ==============================================================================
+# 4. UNIFICAÇÃO NO DATAFRAME LONGO DO PAINEL
+# ==============================================================================
+grade_painel_final <- rbind(grade_rochas, grade_f_laj, grade_f_rup)
+
+grade_painel_final$Fisionomia <- factor(grade_painel_final$Fisionomia, 
+                                        levels = c("Rocky outcrop matrix effect on Low forest plot", 
+                                                   "Rupestrian vegetation matrix effect on Low forest plot",
+                                                   "Low forest matrix effect on Rocky outcrop plot", 
+                                                   "Low forest matrix effect on Rupestrian vegetation plot"))
+
+# ==============================================================================
+# 5. PLOTAGEM DO GRÁFICO FINAL
+# ==============================================================================
+Plot_Landscape_4_Panels <- ggplot(grade_painel_final, aes(x = Proporcao * 100, y = Fit)) +
+  geom_ribbon(aes(ymin = LCL, ymax = UCL), alpha = 0.15, fill = "darkblue", color = NA) +
+  geom_line(linewidth = 1.2, color = "darkblue") +
+  facet_wrap(~ Fisionomia, ncol = 2, scales = "free_y") +
+  scale_x_continuous(expand = c(0, 0), limits = c(0, 101)) +
+  labs(x = "Matrix Cover Proportion within 5m Radius (%)", 
+       y = "Predicted Ipomoea abundance (Individuals / Plot)",
+       title = "Surrounding matrix continuous Effects on Ipomoea abundance",
+       subtitle = "All significant slopes extracted from the baseline-alternated models (Anova Type III, p < 0.05)") +
+  theme_classic(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"),
+        strip.background = element_rect(fill = "gray95"),
+        strip.text = element_text(face = "bold", size = 8.5))
+
+print(Plot_Landscape_4_Panels)
+
+ggsave("Matrix.tiff", 
+       plot = Plot_Landscape_4_Panels, width = 9, height = 7, dpi = 300, device = "tiff")
